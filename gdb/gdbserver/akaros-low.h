@@ -16,4 +16,14 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
+/* server.h MUST be the first included header file. */
+#include "server.h"
+#include <stdio.h>
+#include "target.h"
+
+#define dprintf(format, ...) printf("[g %s:%d] " format, __FUNCTION__, __LINE__, ##__VA_ARGS__)
+
 void initialize_arch(void);
+void akaros_add_process_arch(struct process_info *proc);
+void akaros_fetch_registers_arch(int debug_fd, struct regcache *regcache, int regno);
+void akaros_store_registers_arch(int debug_fd, struct regcache *regcache, int regno);
