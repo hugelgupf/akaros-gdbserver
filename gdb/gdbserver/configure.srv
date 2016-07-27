@@ -366,6 +366,10 @@ case "${target}" in
 			srv_linux_btrace=yes
 			ipa_obj="${ipa_amd64_linux_regobj} linux-amd64-ipa.o"
 			;;
+  x86_64-*-akaros*)	srv_regobj="$srv_amd64_regobj"
+			srv_tgtobj="akaros-low.o akaros-x86-low.o x86-low.o x86-dregs.o"
+			srv_xmlfiles="$srv_amd64_xmlfiles"
+			;;
   x86_64-*-mingw*)	srv_regobj="$srv_amd64_regobj"
 			srv_tgtobj="x86-low.o x86-dregs.o i387-fp.o win32-low.o win32-i386-low.o"
 			srv_xmlfiles="$srv_i386_xmlfiles $srv_amd64_xmlfiles"

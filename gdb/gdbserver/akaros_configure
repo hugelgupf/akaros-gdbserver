@@ -1,0 +1,3 @@
+#!/bin/bash
+AK_TARGET=x86_64-ucb-akaros
+LDFLAGS='-liplib -lpthread' ./configure --target=${AK_TARGET} --host=${AK_TARGET}
