@@ -169,6 +169,7 @@ SFILES=	$(srcdir)/gdbreplay.c $(srcdir)/inferiors.c $(srcdir)/dll.c \
 	$(srcdir)/linux-x86-low.c \
 	$(srcdir)/linux-xtensa-low.c \
 	$(srcdir)/linux-tile-low.c \
+	$(srcdir)/akaros-low.c $(srcdir)/akaros-x86-low.c \
 	$(srcdir)/win32-arm-low.c $(srcdir)/win32-i386-low.c \
 	$(srcdir)/win32-low.c $(srcdir)/wincecompat.c \
 	$(srcdir)/hostio.c $(srcdir)/hostio-errno.c \
@@ -305,8 +306,8 @@ clean-info: force
 
 gdbserver$(EXEEXT): $(OBS) ${ADD_DEPS} ${CDEPS} $(LIBGNU) $(LIBIBERTY)
 	rm -f gdbserver$(EXEEXT)
-	$(CC_LD) $(INTERNAL_CFLAGS) $(INTERNAL_LDFLAGS) -o gdbserver$(EXEEXT) $(OBS) \
-	$(LIBGNU) $(LIBIBERTY) $(GDBSERVER_LIBS) $(XM_CLIBS)
+	$(CC_LD) $(INTERNAL_CFLAGS) -o gdbserver$(EXEEXT) $(OBS) \
+	$(LIBGNU) $(LIBIBERTY) $(GDBSERVER_LIBS) $(XM_CLIBS) $(INTERNAL_LDFLAGS)
 
 $(LIBGNU) $(LIBIBERTY) $(GNULIB_H): all-lib
 all-lib: $(GNULIB_BUILDDIR)/Makefile $(LIBIBERTY_BUILDDIR)/Makefile
