@@ -34,7 +34,8 @@
 #include <printf.h>
 
 void print_ptid(ptid_t ptid);
-static struct process_info *akaros_add_process(pid_t pid, int attached);
+struct process_info *akaros_add_process(pid_t pid, int attached);
+void *wait_thread(void *arg);
 int d9c_hit_breakpoint(pid_t pid, uint64_t tid, uint64_t address);
 int d9c_add_thread(pid_t pid, uint64_t tid);
 
@@ -51,6 +52,18 @@ struct wait_answer {
 };
 TAILQ_HEAD(wait_answer_queue, wait_answer);
 static struct wait_answer_queue wait_answers = TAILQ_HEAD_INITIALIZER(wait_answers);
+
+struct wait_call {
+  pid_t pid;
+  int options;
+};
+
+struct process_info_private {
+  struct d9c_ops debug_ops;
+  pthread_t debug_read_thread;
+  struct wait_call call;
+  pthread_t wait_thread;
+};
 
 /* debugging only: printf specifier functions for PTID to use %P. */
 int printf_ptid(FILE *stream, const struct printf_info *info,
@@ -72,12 +85,7 @@ int printf_ptid_info(const struct printf_info *info, size_t n, int *argtypes,
   return 1;
 }
 
-struct process_info_private {
-  struct d9c_ops debug_ops;
-  pthread_t debug_read_thread;
-};
-
-static struct process_info *akaros_add_process(pid_t pid, int attached) {
+struct process_info *akaros_add_process(pid_t pid, int attached) {
   ptid_t ptid;
   struct process_info *proc = add_process(pid, attached);
   akaros_add_process_arch(proc);
@@ -91,6 +99,35 @@ static struct process_info *akaros_add_process(pid_t pid, int attached) {
   ptid = pid_to_ptid(pid);
   add_thread(ptid, NULL);
   return proc;
+}
+
+void *wait_thread(void *arg) {
+  struct wait_answer *answer;
+  struct wait_call *args = (struct wait_call *) arg;
+
+  int waitstatus;
+  pid_t pid = waitpid(args->pid, &waitstatus, args->options);
+  if (pid == -1) {
+    return NULL;
+  }
+
+  uth_mutex_lock(wait_mutex);
+  answer = (struct wait_answer *) malloc(sizeof(struct wait_answer));
+
+  if (pid <= 0) {
+    answer->status.kind = TARGET_WAITKIND_IGNORE;
+  } else {
+    answer->status.kind = TARGET_WAITKIND_EXITED;
+    answer->status.value.sig = gdb_signal_from_host(WEXITSTATUS(waitstatus));
+    answer->ptid.pid = pid;
+    answer->ptid.lwp = 0;
+    answer->ptid.tid = 0;
+  }
+  TAILQ_INSERT_TAIL(&wait_answers, answer, entry);
+  uth_mutex_unlock(wait_mutex);
+  uth_cond_var_broadcast(wait_cv);
+
+  return NULL;
 }
 
 /* Attach to a running process.
@@ -111,8 +148,8 @@ int akaros_attach (unsigned long pid) {
     sys_block(100);
 
   proc = akaros_add_process(pid, 1);
-  if (pthread_create(&(proc->priv->debug_read_thread), NULL, d9c_read_thread,
-                     &debug_fd)) {
+  if ((errno = pthread_create(&(proc->priv->debug_read_thread), NULL,
+                              d9c_read_thread, &debug_fd))) {
     perror("pthread_create");
     print_func_exit();
     return 1;
@@ -120,6 +157,15 @@ int akaros_attach (unsigned long pid) {
 
   wait_mutex = uth_mutex_alloc();
   wait_cv = uth_cond_var_alloc();
+
+  proc->priv->call.options = 0;
+  proc->priv->call.pid = pid;
+  if ((errno = pthread_create(&(proc->priv->wait_thread), NULL, wait_thread,
+                              &(proc->priv->call)))) {
+    perror("pthread_create");
+    print_func_exit();
+    return 1;
+  }
 
   print_func_exit();
   return 0;
@@ -136,8 +182,7 @@ int akaros_attach (unsigned long pid) {
 int akaros_create_inferior (char *program, char **args) {
   pid_t pid = 0;
   print_func_entry();
-  pid = sys_proc_create(program, strlen(program), args, /* envp */ NULL,
-                        PROC_DUP_FGRP);
+  pid = create_child_with_stdfds(program, strlen(program), args, /* envp */ NULL);
   if (pid < 0) {
     perror("proc_create");
     print_func_exit();
@@ -172,7 +217,7 @@ int akaros_detach (int pid) {
   return 0;
 }
 
-static int _delete_thread_callback (struct inferior_list_entry *entry, void *p)
+int _delete_thread_callback (struct inferior_list_entry *entry, void *p)
 {
   struct process_info *process = (struct process_info *) p;
 
@@ -212,26 +257,20 @@ int akaros_thread_alive (ptid_t pid) {
 void akaros_resume (struct thread_resume *resume_info, size_t n) {
   struct thread_info *thread;
 
-  dprintf("resuming %p\n", &(resume_info->thread));
+  if (n != 1) {
+    dprintf("resuming more than one thing not supported at the moment\n");
+    return;
+  }
 
   resume_info->thread.lwp = 0; /* For some reason, this is set to -1. */
 
-  thread = find_thread_ptid(resume_info->thread);
+  thread = find_thread_ptid(resume_info[0].thread);
   regcache_invalidate_thread (thread);
 
-  print_func_entry();
-  switch (resume_info[0].kind) {
-    case resume_continue:
-      d9c_resume(debug_fd);
-      break;
+  uint64_t tid = ptid_get_tid(resume_info[0].thread);
+  bool singlestep = (resume_info[0].kind == resume_step);
+  d9c_resume(debug_fd, tid, singlestep);
 
-    case resume_step:
-      break;
-
-    case resume_stop:
-      break;
-  }
-  print_func_exit();
   return;
 }
 
@@ -261,41 +300,6 @@ int d9c_hit_breakpoint(pid_t pid, uint64_t tid, uint64_t address) {
   return 0;
 }
 
-struct waitcall {
-  pid_t pid;
-  int options;
-};
-
-void *wait_thread(void *arg) {
-  struct wait_answer *answer;
-  struct waitcall *args = (struct waitcall *) arg;
-  int waitstatus;
-  pid_t pid = waitpid(args->pid, &waitstatus, args->options);
-  if (pid == -1) {
-    perror("waitpid");
-    return NULL;
-  }
-  dprintf("waitpid returned: %d / %p\n", pid, (long) waitstatus);
-
-  uth_mutex_lock(wait_mutex);
-  answer = (struct wait_answer *) malloc(sizeof(struct wait_answer));
-
-  if (pid <= 0) {
-    answer->status.kind = TARGET_WAITKIND_IGNORE;
-  } else {
-    answer->status.kind = TARGET_WAITKIND_EXITED;
-    answer->status.value.sig = gdb_signal_from_host(WEXITSTATUS(waitstatus));
-    answer->ptid.pid = pid;
-    answer->ptid.lwp = 0;
-    answer->ptid.tid = 0;
-  }
-  TAILQ_INSERT_TAIL(&wait_answers, answer, entry);
-  uth_mutex_unlock(wait_mutex);
-  uth_cond_var_broadcast(wait_cv);
-
-  return NULL;
-}
-
 /* Wait for the inferior process or thread to change state.  Store
    status through argument pointer STATUS.
 
@@ -307,43 +311,25 @@ void *wait_thread(void *arg) {
    no child stop to report, return is
    null_ptid/TARGET_WAITKIND_IGNORE.  */
 ptid_t akaros_wait (ptid_t ptid, struct target_waitstatus *status, int options) {
-  struct waitcall call = {0, 0};
-  pthread_t waitthread;
   int pid;
   struct wait_answer *answer;
   print_func_entry();
 
-  if (options & TARGET_WNOHANG) {
-    call.options |= WNOHANG;
-  }
-
-  /* TODO: What if it's a thread id? what does linux do? */
-  if (ptid_is_pid(ptid) || ptid_equal(minus_one_ptid, ptid)) {
-    pid = ptid_get_pid(ptid);
-    call.pid = pid;
-
-    if ((errno = pthread_create(&waitthread, NULL, wait_thread, &call))) {
-      perror("pthread_create");
-      return ptid;
-    }
-  }
-
   uth_mutex_lock(wait_mutex);
   while ((answer = TAILQ_FIRST(&wait_answers)) == NULL) {
-    uth_cond_var_wait(wait_cv, wait_mutex);
+    if (options & TARGET_WNOHANG) {
+      /* return immediately if WNOHANG was passed. */
+      return null_ptid;
+    } else {
+      uth_cond_var_wait(wait_cv, wait_mutex);
+    }
   }
   TAILQ_REMOVE(&wait_answers, answer, entry);
   *status = answer->status;
   ptid = answer->ptid;
   uth_mutex_unlock(wait_mutex);
 
-  if (call.pid != 0) {
-    //dprintf("canceling thread\n");
-    //pthread_cancel(waitthread);
-  }
-
   print_func_exit();
-  dprintf("received ptid %P / status %d / signal %d\n", &ptid, status->kind, status->value.sig);
   return ptid;
 }
 
@@ -351,14 +337,18 @@ ptid_t akaros_wait (ptid_t ptid, struct target_waitstatus *status, int options) 
 
    If REGNO is -1, fetch all registers; otherwise, fetch at least REGNO.  */
 void akaros_fetch_registers (struct regcache *regcache, int regno) {
+  print_func_entry();
   akaros_fetch_registers_arch(debug_fd, regcache, regno);
+  print_func_exit();
 }
 
 /* Store registers to the inferior process.
 
    If REGNO is -1, store all registers; otherwise, store at least REGNO.  */
 void akaros_store_registers (struct regcache *regcache, int regno) {
+  print_func_entry();
   akaros_store_registers_arch(debug_fd, regcache, regno);
+  print_func_exit();
 }
 
 /* Read memory from the inferior process.  This should generally be
@@ -383,10 +373,11 @@ int akaros_read_memory (CORE_ADDR memaddr, unsigned char *myaddr, int len) {
    Returns 0 on success and errno on failure.  */
 int akaros_write_memory (CORE_ADDR memaddr, const unsigned char *myaddr,
                      int len) {
+  int ret;
   print_func_entry();
-  assert(0);
+  ret = d9c_store_memory(debug_fd, memaddr, myaddr, len);
   print_func_exit();
-  return 0;
+  return -ret;
 }
 
 /* Query GDB for the values of any symbols we're interested in.
@@ -440,14 +431,14 @@ int akaros_supports_z_point_type (char z_type) {
    Returns 0 on success, -1 on failure and 1 on unsupported.  */
 int akaros_insert_point (enum raw_bkpt_type type, CORE_ADDR addr,
                      int size, struct raw_breakpoint *bp) {
-  	print_func_entry();
+  print_func_entry();
   assert(0);
   print_func_exit();
   return 0;
 }
 int akaros_remove_point (enum raw_bkpt_type type, CORE_ADDR addr,
                      int size, struct raw_breakpoint *bp) {
-  	print_func_entry();
+  print_func_entry();
   assert(0);
   print_func_exit();
   return 0;
