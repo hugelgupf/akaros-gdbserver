@@ -118,6 +118,7 @@ case $maybe_os in
   linux-musl* | linux-uclibc* | uclinux-uclibc* | uclinux-gnu* | kfreebsd*-gnu* | \
   knetbsd*-gnu* | netbsd*-gnu* | netbsd*-eabi* | \
   kopensolaris*-gnu* | \
+  ucb-akaros | \
   storm-chaos* | os2-emx* | rtmk-nova*)
     os=-$maybe_os
     basic_machine=`echo $1 | sed 's/^\(.*\)-\([^-]*-[^-]*\)$/\1/'`
@@ -1344,13 +1345,15 @@ case $basic_machine in
 esac
 
 # Decode manufacturer-specific aliases for certain operating systems.
-
 if [ x"$os" != x"" ]
 then
 case $os in
 	# First match some system type aliases
 	# that might get confused with valid system types.
 	# -solaris* is a basic system type, with this one exception.
+        -ucb-akaros)
+                os=-ucb-akaros
+                ;;
 	-auroraux)
 		os=-auroraux
 		;;
