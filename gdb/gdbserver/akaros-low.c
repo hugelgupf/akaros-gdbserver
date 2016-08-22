@@ -138,14 +138,10 @@ void *wait_thread(void *arg) {
    Returns -1 if attaching is unsupported, 0 on success, and calls
    error() otherwise.  */
 int akaros_attach (unsigned long pid) {
-  char buf[60];
   struct process_info *proc;
   print_func_entry();
 
-  snprintf(buf, sizeof(buf), "#srv/debug-%lu", pid);
-  /* Just retry that. */
-  while ((debug_fd = open(buf, O_RDWR)) < 0)
-    sys_block(100);
+  debug_fd = d9c_attach(pid);
 
   proc = akaros_add_process(pid, 1);
   if ((errno = pthread_create(&(proc->priv->debug_read_thread), NULL,
